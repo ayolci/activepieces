@@ -72,7 +72,7 @@ export const flowSideEffects = (log: FastifyBaseLogger) => ({
         })
     },
 
-    onOperationApplied({ flow, previousVersion, previousStatus, operation, ...meta }: OnOperationAppliedParams): void {
+    onOperationApplied({ flow, previousVersion, previousStatus, operation, auditReason, ...meta }: OnOperationAppliedParams): void {
         applicationEvents(log).sendUserEvent(meta, {
             action: ApplicationEventName.FLOW_UPDATED,
             data: {
@@ -83,6 +83,7 @@ export const flowSideEffects = (log: FastifyBaseLogger) => ({
                     updated: flow.updated,
                 },
                 request: operation,
+                reason: auditReason,
                 flowVersion: previousVersion,
             },
         })
@@ -162,6 +163,7 @@ type OnOperationAppliedParams = FlowEventParams & {
     previousVersion: FlowVersion
     previousStatus: FlowStatus
     operation: FlowOperationRequest
+    auditReason?: string
 }
 
 type OnDraftWrittenParams = {
