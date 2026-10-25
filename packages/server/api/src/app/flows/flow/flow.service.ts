@@ -112,6 +112,7 @@ export const flowService = (log: FastifyBaseLogger) => ({
         agentExternalIds,
         externalIds,
         flowIds,
+        excludedFlowIds,
         versionState = FlowVersionState.DRAFT,
         includeTriggerSource = true,
         sortBy,
@@ -204,6 +205,10 @@ export const flowService = (log: FastifyBaseLogger) => ({
 
         if (flowIds !== undefined) {
             queryBuilder.andWhere('ff.id IN (:...flowIds)', { flowIds })
+        }
+
+        if (excludedFlowIds !== undefined && excludedFlowIds.length > 0) {
+            queryBuilder.andWhere('ff.id NOT IN (:...excludedFlowIds)', { excludedFlowIds })
         }
 
         if (connectionExternalIds !== undefined) {
@@ -976,6 +981,7 @@ type ListParamsBase = {
     versionState?: FlowVersionState
     externalIds?: string[]
     flowIds?: FlowId[]
+    excludedFlowIds?: FlowId[]
     connectionExternalIds?: string[]
     agentExternalIds?: string[]
     includeTriggerSource?: boolean

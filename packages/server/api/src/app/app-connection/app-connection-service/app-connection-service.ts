@@ -359,19 +359,10 @@ export const appConnectionService = (log: FastifyBaseLogger) => ({
             return
         }
 
-        // Repoint page by page: each repointed flow drops out of the connection
-        // filter, so re-fetching the first page walks the whole set without the
-        // cursor skew of paginating rows that are being mutated. The seen-set
-        // stops the loop if a flow fails to leave the filter (e.g. an auth
-        // string the rewrite does not understand) instead of spinning forever.
-        const repointedFlowIds = new Set<string>()
+        const repointedFlowIds = new Set<FlowId>()
         for (;;) {
-            const flowsUsingConnection = await listFlowsUsingConnection({ log, projectId, externalId: sourceAppConnection.externalId, applyToPublishedVersions })
-            const flowsToRepoint = flowsUsingConnection.filter((flow) => !repointedFlowIds.has(flow.id))
+            const flowsToRepoint = await listFlowsUsingConnection({ log, projectId, externalId: sourceAppConnection.externalId, applyToPublishedVersions, excludedFlowIds: [...repointedFlowIds] })
             if (flowsToRepoint.length === 0) {
-                if (flowsUsingConnection.length > 0) {
-                    log.warn({ oldConnectionId: sourceAppConnectionId, stuckFlowIds: flowsUsingConnection.map((flow) => flow.id) }, 'Replace could not rewrite some flow references; they keep the old connection')
-                }
                 break
             }
             await appConnectionHandler(log).replaceConnectionInFlows(flowsToRepoint, {
@@ -924,7 +915,7 @@ const engineResolveConnectionIdentifier = async (
     return identifier ?? undefined
 }
 
-async function listFlowsUsingConnection({ log, projectId, externalId, applyToPublishedVersions }: ListFlowsUsingConnectionParams): Promise<PopulatedFlow[]> {
+async function listFlowsUsingConnection({ log, projectId, externalId, applyToPublishedVersions, excludedFlowIds }: ListFlowsUsingConnectionParams): Promise<PopulatedFlow[]> {
     const baseListParams = {
         projectIds: [projectId],
         cursorRequest: null,
@@ -932,6 +923,7 @@ async function listFlowsUsingConnection({ log, projectId, externalId, applyToPub
         folderId: undefined,
         name: undefined,
         status: undefined,
+        excludedFlowIds,
     }
     const flowsUsingConnectionInDraft = await flowService(log).list({ ...baseListParams, connectionExternalIds: [externalId] })
     if (!applyToPublishedVersions) {
@@ -1105,6 +1097,7 @@ type ListFlowsUsingConnectionParams = {
     projectId: ProjectId
     externalId: string
     applyToPublishedVersions: boolean
+    excludedFlowIds: FlowId[]
 }
 
 type ReplaceParams = {
