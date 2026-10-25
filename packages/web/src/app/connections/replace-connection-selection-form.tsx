@@ -7,7 +7,6 @@ import { t } from 'i18next';
 import { GlobeIcon, Info } from 'lucide-react';
 import { useFormContext, useWatch } from 'react-hook-form';
 
-import { LogoPlate } from '@/components/custom/logo-plate';
 import { SearchableSelect } from '@/components/custom/searchable-select';
 import { FormField, FormMessage } from '@/components/ui/form';
 import { Label } from '@/components/ui/label';
@@ -75,10 +74,10 @@ const ReplaceConnectionSelectionFields = ({
                 );
                 return (
                   <div className="flex gap-2 items-center">
-                    <LogoPlate
-                      src={piece!.logoUrl}
-                      alt={piece!.displayName}
-                      size="xxs"
+                    <PieceIconWithPieceName
+                      pieceName={piece!.name}
+                      size="xs"
+                      border={false}
                     />
                     <span>{piece!.displayName}</span>
                   </div>

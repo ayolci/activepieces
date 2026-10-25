@@ -4,7 +4,7 @@ import {
 } from '@activepieces/shared';
 import { useMutation } from '@tanstack/react-query';
 import { t } from 'i18next';
-import { TriangleAlert } from 'lucide-react';
+import { Info } from 'lucide-react';
 import React, { useState } from 'react';
 import { useForm } from 'react-hook-form';
 
@@ -129,6 +129,14 @@ function ReplaceConnectionForFlowForm({
         onSubmit={form.handleSubmit((values) => saveEditsThenReplace(values))}
         className="flex flex-col gap-4"
       >
+        <Alert>
+          <Info className="size-4" />
+          <AlertDescription>
+            {t(
+              'Steps that use the replaced connection keep their settings. Test your flow to make sure nothing breaks.',
+            )}
+          </AlertDescription>
+        </Alert>
         <ReplaceConnectionSelectionFields
           pieces={flowPieces}
           sourceConnections={flowConnections}
@@ -136,14 +144,6 @@ function ReplaceConnectionForFlowForm({
           loading={piecesLoading || connectionsLoading}
         />
         <ReplaceConnectionVersionsField />
-        <Alert variant="warning">
-          <TriangleAlert className="h-4 w-4" />
-          <AlertDescription>
-            {t(
-              'Inputs that depend on this connection keep their values, make sure you test the flow before you publish',
-            )}
-          </AlertDescription>
-        </Alert>
         <DialogFooter>
           <DialogClose asChild>
             <Button type="button" variant="ghost">

@@ -97,7 +97,7 @@ describe('flowStructureUtil.replaceConnection', () => {
             },
         }
         const flowVersion = flowWith(agentStep)
-        expect(flowStructureUtil.extractAgentToolConnectionIds(flowVersion)).toEqual(['old', 'other'])
+        expect(flowStructureUtil.extractAgentToolsConnectionIds(flowVersion)).toEqual(['old', 'other'])
         expect(flowStructureUtil.extractConnectionIds(flowVersion)).toEqual(['old', 'other'])
 
         const result = flowStructureUtil.replaceConnection({ flowVersion, sourceExternalId: 'old', targetExternalId: 'new' })
@@ -117,7 +117,7 @@ describe('flowStructureUtil.replaceConnection', () => {
             settings: { ...step.settings, input: { agentTools: [slackTool({ toolName: 'send', auth: 'old' })] } },
         }
         const flowVersion = flowWith(otherPieceStep)
-        expect(flowStructureUtil.extractAgentToolConnectionIds(flowVersion)).toEqual([])
+        expect(flowStructureUtil.extractAgentToolsConnectionIds(flowVersion)).toEqual([])
 
         const result = flowStructureUtil.replaceConnection({ flowVersion, sourceExternalId: 'old', targetExternalId: 'new' })
 
