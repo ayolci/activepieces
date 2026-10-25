@@ -2,6 +2,8 @@ import { isNil } from '@activepieces/core-utils';
 import {
   AppConnectionReplaceScope,
   AppConnectionScope,
+  FlowVersionState,
+  Permission,
 } from '@activepieces/shared';
 import { useMutation } from '@tanstack/react-query';
 import { t } from 'i18next';
@@ -43,6 +45,9 @@ import {
 } from '@/features/connections';
 import { flowsApi } from '@/features/flows';
 import { piecesHooks } from '@/features/pieces';
+import { projectCollectionUtils } from '@/features/projects/stores/project-collection';
+import { useAuthorization } from '@/hooks/authorization-hooks';
+import { platformHooks } from '@/hooks/platform-hooks';
 
 import {
   LabelWithTooltip,
@@ -79,6 +84,13 @@ function ReplaceConnectionForProjectForm({
   setDialogOpen,
 }: ReplaceConnectionForProjectFormProps) {
   const navigate = useNavigate();
+  const { platform } = platformHooks.useCurrentPlatform();
+  const { project } = projectCollectionUtils.useCurrentProject();
+  const { checkAccess } = useAuthorization();
+  const publishNeedsApproval =
+    platform.plan.environmentsEnabled &&
+    !!project.sensitive &&
+    !checkAccess(Permission.PUBLISH_SENSITIVE_FLOW_ACCESS);
   const [step, setStep] = useState<ProjectReplaceStep>(
     ProjectReplaceStep.CHOOSE_CONNECTIONS,
   );
@@ -93,21 +105,34 @@ function ReplaceConnectionForProjectForm({
   const { mutate: replaceConnections, isPending: isReplacing } =
     appConnectionsMutations.useReplaceConnections({
       setDialogOpen,
+      connections: connections?.data ?? [],
       refetch: onConnectionMerged,
     });
 
   const {
     mutate: fetchAffectedFlows,
-    data: affectedFlowsPage,
+    data: flowsUsingConnection,
     isPending: isFetchingAffectedFlows,
   } = useMutation({
-    mutationFn: (externalId: string) =>
-      flowsApi.list({
+    mutationFn: async (externalId: string) => {
+      const request = {
         projectId,
         connectionExternalIds: [externalId],
         cursor: undefined,
         limit: 1000,
-      }),
+      };
+      const [draftFlowsPage, publishedFlowsPage] = await Promise.all([
+        flowsApi.list(request),
+        flowsApi.list({ ...request, versionState: FlowVersionState.LOCKED }),
+      ]);
+      const draftFlowIds = new Set(draftFlowsPage.data.map((flow) => flow.id));
+      return {
+        draftFlows: draftFlowsPage.data,
+        publishedOnlyFlows: publishedFlowsPage.data.filter(
+          (flow) => !draftFlowIds.has(flow.id),
+        ),
+      };
+    },
     onSuccess: () => setStep(ProjectReplaceStep.REVIEW_AFFECTED_FLOWS),
     onError: () => {
       toast.error(t('Error'), {
@@ -144,20 +169,24 @@ function ReplaceConnectionForProjectForm({
         connectionPieceNames.has(piece.name),
     ) ?? [];
 
-  const affectedFlows = affectedFlowsPage?.data ?? [];
-  const hasPublishedAffectedFlows = affectedFlows.some(
-    (flow) => !isNil(flow.publishedVersionId),
+  const sourceConnection = projectConnections.find(
+    (connection) => connection.id === sourceConnectionId,
   );
+  const draftFlows = flowsUsingConnection?.draftFlows ?? [];
+  const publishedOnlyFlows = flowsUsingConnection?.publishedOnlyFlows ?? [];
+  const affectedFlows = applyToPublishedVersions
+    ? [...draftFlows, ...publishedOnlyFlows]
+    : draftFlows;
+  const hasPublishedAffectedFlows =
+    publishedOnlyFlows.length > 0 ||
+    draftFlows.some((flow) => !isNil(flow.publishedVersionId));
   const sourceIsGlobalConnection =
-    projectConnections.find(
-      (connection) => connection.id === sourceConnectionId,
-    )?.scope === AppConnectionScope.PLATFORM;
+    sourceConnection?.scope === AppConnectionScope.PLATFORM;
+  const deleteBlockedByApproval =
+    publishNeedsApproval && hasPublishedAffectedFlows;
 
   const handleSubmit = (values: ProjectReplaceFormValues) => {
     if (step === ProjectReplaceStep.CHOOSE_CONNECTIONS) {
-      const sourceConnection = projectConnections.find(
-        (connection) => connection.id === values.sourceConnectionId,
-      );
       if (sourceConnection) {
         fetchAffectedFlows(sourceConnection.externalId);
       }
@@ -173,7 +202,8 @@ function ReplaceConnectionForProjectForm({
       deleteSourceConnection:
         values.deleteSourceConnection &&
         !deleteBlockedByPublishedFlows &&
-        !sourceIsGlobalConnection,
+        !sourceIsGlobalConnection &&
+        !deleteBlockedByApproval,
       applyToPublishedVersions: values.applyToPublishedVersions,
     });
   };
@@ -278,7 +308,7 @@ function ReplaceConnectionForProjectForm({
                     <LabelWithTooltip
                       label={t('After replacing')}
                       tooltip={t(
-                        'Keep the old connection to reuse it later, or delete it for good. Deleting is unavailable while published flows still use it — switch the option above to Draft and published first. Global connections can only be deleted from the platform admin page.',
+                        'Keep the old connection to reuse it later, or delete it for good. Deleting is unavailable while published flows still use it — switch the option above to Draft and published first. In a project that needs approval to publish, delete it after the flows are approved. Global connections can only be deleted from the platform admin page.',
                       )}
                     />
                     <Select
@@ -299,7 +329,8 @@ function ReplaceConnectionForProjectForm({
                           disabled={
                             (!applyToPublishedVersions &&
                               hasPublishedAffectedFlows) ||
-                            sourceIsGlobalConnection
+                            sourceIsGlobalConnection ||
+                            deleteBlockedByApproval
                           }
                         >
                           {t('Delete the old connection')}

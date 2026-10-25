@@ -1,6 +1,8 @@
 import {
   AppConnectionReplaceScope,
   flowStructureUtil,
+  isNil,
+  unique,
 } from '@activepieces/shared';
 import { useMutation } from '@tanstack/react-query';
 import { t } from 'i18next';
@@ -33,6 +35,7 @@ import {
   appConnectionsMutations,
   appConnectionsQueries,
 } from '@/features/connections';
+import { flowHooks } from '@/features/flows';
 import { piecesHooks } from '@/features/pieces';
 import { authenticationSession } from '@/lib/authentication-session';
 
@@ -83,25 +86,33 @@ function ReplaceConnectionForFlowForm({
       extraKeys: [projectId],
       staleTime: 0,
     });
-  const { mutateAsync: replaceConnections } =
+  const publishedVersionId = flow.publishedVersionId;
+  const { data: publishedFlow, isLoading: publishedFlowLoading } =
+    flowHooks.useGetFlow({
+      flowId: flow.id,
+      versionId: publishedVersionId ?? undefined,
+      enabled:
+        !isNil(publishedVersionId) && publishedVersionId !== flowVersion.id,
+    });
+  const { mutate: replaceConnections, isPending: isReplacing } =
     appConnectionsMutations.useReplaceConnections({
       setDialogOpen,
+      connections: connections?.data ?? [],
       refetch: () => {
         refreshDraft().catch(() => internalErrorToast());
       },
     });
-  const { mutate: saveEditsThenReplace, isPending: isReplacing } = useMutation({
-    mutationFn: async (values: FlowReplaceFormValues) => {
-      await savePendingEdits();
-      await replaceConnections({
+  const { mutate: saveEditsThenReplace, isPending: isSaving } = useMutation({
+    mutationFn: (_values: FlowReplaceFormValues) => savePendingEdits(),
+    onSuccess: (_, values) =>
+      replaceConnections({
         scope: AppConnectionReplaceScope.FLOW,
         flowIds: [flow.id],
         projectId,
         sourceAppConnectionId: values.sourceConnectionId,
         targetAppConnectionId: values.targetConnectionId,
         applyToPublishedVersions: values.applyToPublishedVersions,
-      });
-    },
+      }),
   });
   const form = useForm<FlowReplaceFormValues>({
     defaultValues: {
@@ -112,8 +123,12 @@ function ReplaceConnectionForFlowForm({
   });
 
   const projectConnections = connections?.data ?? [];
-  const flowConnectionExternalIds =
-    flowStructureUtil.extractConnectionIds(flowVersion);
+  const flowConnectionExternalIds = unique([
+    ...flowStructureUtil.extractConnectionIds(flowVersion),
+    ...(publishedFlow
+      ? flowStructureUtil.extractConnectionIds(publishedFlow.version)
+      : []),
+  ]);
   const flowConnections = projectConnections.filter((connection) =>
     flowConnectionExternalIds.includes(connection.externalId),
   );
@@ -137,20 +152,20 @@ function ReplaceConnectionForFlowForm({
             )}
           </AlertDescription>
         </Alert>
+        <ReplaceConnectionVersionsField />
         <ReplaceConnectionSelectionFields
           pieces={flowPieces}
           sourceConnections={flowConnections}
           targetConnections={projectConnections}
-          loading={piecesLoading || connectionsLoading}
+          loading={piecesLoading || connectionsLoading || publishedFlowLoading}
         />
-        <ReplaceConnectionVersionsField />
         <DialogFooter>
           <DialogClose asChild>
             <Button type="button" variant="ghost">
               {t('Cancel')}
             </Button>
           </DialogClose>
-          <Button type="submit" loading={isReplacing}>
+          <Button type="submit" loading={isSaving || isReplacing}>
             {t('Replace')}
           </Button>
         </DialogFooter>

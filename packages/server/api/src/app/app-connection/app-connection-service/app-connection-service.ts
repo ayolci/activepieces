@@ -1,12 +1,13 @@
 import { ActivepiecesError, apId, Cursor, ErrorCode, FlowId, isNil, Metadata, PlatformId, ProjectId, SeekPage, spreadIfDefined, tryCatch, tryCatchSync, unique, UserId } from '@activepieces/core-utils'
 import { PieceMetadata } from '@activepieces/pieces-framework'
-import { ApEdition, ApEnvironment, AppConnection, AppConnectionId, AppConnectionOwners, AppConnectionReplaceScope, AppConnectionScope, AppConnectionStatus, AppConnectionType, AppConnectionValue, AppConnectionWithoutSensitiveData, ConnectionState, EngineResponse, EngineResponseStatus, ExecuteResolveConnectionIdentifierResponse, ExecuteValidateAuthResponse, MAX_PLATFORM_APP_CONNECTION_OWNERS, OAuth2GrantType, PlatformAppConnectionOwner, PlatformAppConnectionOwnersResponse, PlatformAppConnectionProjectInfo, PlatformAppConnectionsListItem, PlatformRole, UpsertAppConnectionRequestBody, WorkerJobType } from '@activepieces/shared'
+import { ApEdition, ApEnvironment, AppConnection, AppConnectionId, AppConnectionOwners, AppConnectionReplaceScope, AppConnectionScope, AppConnectionStatus, AppConnectionType, AppConnectionValue, AppConnectionWithoutSensitiveData, ConnectionState, EngineResponse, EngineResponseStatus, ExecuteResolveConnectionIdentifierResponse, ExecuteValidateAuthResponse, FlowVersionState, MAX_PLATFORM_APP_CONNECTION_OWNERS, OAuth2GrantType, PlatformAppConnectionOwner, PlatformAppConnectionOwnersResponse, PlatformAppConnectionProjectInfo, PlatformAppConnectionsListItem, PlatformRole, PopulatedFlow, UpsertAppConnectionRequestBody, WorkerJobType } from '@activepieces/shared'
 import { FastifyBaseLogger } from 'fastify'
 import semver from 'semver'
 import { ArrayContains, Equal, FindOperator, FindOptionsWhere, ILike, In } from 'typeorm'
 import { repoFactory } from '../../core/db/repo-factory'
 import { projectMemberService } from '../../ee/projects/project-members/project-member.service'
 import { containsSecretManagerReference, secretManagersService } from '../../ee/secret-managers/secret-managers.service'
+import { publishHooksFactory } from '../../flows/flow/flow-publish-hooks'
 import { flowService } from '../../flows/flow/flow.service'
 import { encryptUtils } from '../../helper/encryption'
 import { jwtUtils } from '../../helper/jwt-utils'
@@ -307,23 +308,22 @@ export const appConnectionService = (log: FastifyBaseLogger) => ({
             })
         }
 
-        // Reject up-front (before mutating any flow) when published versions this
-        // replace won't touch still use the source connection. When
-        // applyToPublishedVersions is set, that is only the published versions
-        // invisible to the replace (their flow's latest version no longer
-        // references the connection); updating those in place would overwrite
-        // the newer draft, so the user has to publish or repoint them first.
-        // Without it, a delete would orphan every published reference.
-        const publishedFlowsUsingConnection = deleteSourceConnection || applyToPublishedVersions
-            ? await appConnectionHandler(log).countPublishedFlowsReferencingConnection({ projectId, externalId: sourceAppConnection.externalId, applyToPublishedVersions, flowIds: params.scope === AppConnectionReplaceScope.FLOW ? params.flowIds : undefined })
+        const publishedFlowsUsingConnection = deleteSourceConnection
+            ? await appConnectionHandler(log).countPublishedFlowsReferencingConnection({ projectId, externalId: sourceAppConnection.externalId })
             : 0
-        if (publishedFlowsUsingConnection > 0) {
+        if (publishedFlowsUsingConnection > 0 && !applyToPublishedVersions) {
             throw new ActivepiecesError({
                 code: ErrorCode.VALIDATION,
                 params: {
-                    message: deleteSourceConnection
-                        ? 'Cannot delete the old connection because it is still used by published flows that were not updated'
-                        : 'Some published flows still use the old connection but have unpublished draft changes — publish those flows first',
+                    message: 'Cannot delete the old connection because it is still used by published flows that were not updated',
+                },
+            })
+        }
+        if (publishedFlowsUsingConnection > 0 && await publishHooksFactory.get(log).routePublish({ projectId, platformId, userId }) === 'NEEDS_APPROVAL') {
+            throw new ActivepiecesError({
+                code: ErrorCode.VALIDATION,
+                params: {
+                    message: 'This project needs approval to publish, so the old connection cannot be deleted now. Keep it, and delete it after the flows are approved.',
                 },
             })
         }
@@ -349,7 +349,7 @@ export const appConnectionService = (log: FastifyBaseLogger) => ({
                     },
                 })
             }
-            await appConnectionHandler(log).updateFlowsWithAppConnection(flows.data, {
+            await appConnectionHandler(log).replaceConnectionInFlows(flows.data, {
                 appConnection: sourceAppConnection,
                 newAppConnection: targetAppConnection,
                 userId,
@@ -366,23 +366,15 @@ export const appConnectionService = (log: FastifyBaseLogger) => ({
         // string the rewrite does not understand) instead of spinning forever.
         const repointedFlowIds = new Set<string>()
         for (;;) {
-            const flowsPage = await flowService(log).list({
-                projectIds: [projectId],
-                cursorRequest: null,
-                limit: 1000,
-                folderId: undefined,
-                name: undefined,
-                status: undefined,
-                connectionExternalIds: [sourceAppConnection.externalId],
-            })
-            const flowsToRepoint = flowsPage.data.filter((flow) => !repointedFlowIds.has(flow.id))
+            const flowsUsingConnection = await listFlowsUsingConnection({ log, projectId, externalId: sourceAppConnection.externalId, applyToPublishedVersions })
+            const flowsToRepoint = flowsUsingConnection.filter((flow) => !repointedFlowIds.has(flow.id))
             if (flowsToRepoint.length === 0) {
-                if (flowsPage.data.length > 0) {
-                    log.warn({ oldConnectionId: sourceAppConnectionId, stuckFlowIds: flowsPage.data.map((flow) => flow.id) }, 'Replace could not rewrite some flow references; they keep the old connection')
+                if (flowsUsingConnection.length > 0) {
+                    log.warn({ oldConnectionId: sourceAppConnectionId, stuckFlowIds: flowsUsingConnection.map((flow) => flow.id) }, 'Replace could not rewrite some flow references; they keep the old connection')
                 }
                 break
             }
-            await appConnectionHandler(log).updateFlowsWithAppConnection(flowsToRepoint, {
+            await appConnectionHandler(log).replaceConnectionInFlows(flowsToRepoint, {
                 appConnection: sourceAppConnection,
                 newAppConnection: targetAppConnection,
                 userId,
@@ -413,7 +405,7 @@ export const appConnectionService = (log: FastifyBaseLogger) => ({
         })
         const remainingPublishedFlows = remainingFlows.data.length > 0
             ? 0
-            : await appConnectionHandler(log).countPublishedFlowsReferencingConnection({ projectId, externalId: sourceAppConnection.externalId, applyToPublishedVersions: false })
+            : await appConnectionHandler(log).countPublishedFlowsReferencingConnection({ projectId, externalId: sourceAppConnection.externalId })
         if (remainingFlows.data.length > 0 || remainingPublishedFlows > 0) {
             throw new ActivepiecesError({
                 code: ErrorCode.VALIDATION,
@@ -932,6 +924,29 @@ const engineResolveConnectionIdentifier = async (
     return identifier ?? undefined
 }
 
+async function listFlowsUsingConnection({ log, projectId, externalId, applyToPublishedVersions }: ListFlowsUsingConnectionParams): Promise<PopulatedFlow[]> {
+    const baseListParams = {
+        projectIds: [projectId],
+        cursorRequest: null,
+        limit: 1000,
+        folderId: undefined,
+        name: undefined,
+        status: undefined,
+    }
+    const flowsUsingConnectionInDraft = await flowService(log).list({ ...baseListParams, connectionExternalIds: [externalId] })
+    if (!applyToPublishedVersions) {
+        return flowsUsingConnectionInDraft.data
+    }
+    const flowsUsingConnectionInPublishedVersion = await flowService(log).list({ ...baseListParams, connectionExternalIds: [externalId], versionState: FlowVersionState.LOCKED })
+    const flowIdsUsingConnectionInDraft = new Set(flowsUsingConnectionInDraft.data.map((flow) => flow.id))
+    const flowIdsUsingConnectionOnlyInPublishedVersion = flowsUsingConnectionInPublishedVersion.data.map((flow) => flow.id).filter((flowId) => !flowIdsUsingConnectionInDraft.has(flowId))
+    if (flowIdsUsingConnectionOnlyInPublishedVersion.length === 0) {
+        return flowsUsingConnectionInDraft.data
+    }
+    const flowsUsingConnectionOnlyInPublishedVersion = await flowService(log).list({ ...baseListParams, flowIds: flowIdsUsingConnectionOnlyInPublishedVersion })
+    return [...flowsUsingConnectionInDraft.data, ...flowsUsingConnectionOnlyInPublishedVersion.data]
+}
+
 async function fetchFlowIdsForConnections(
     log: FastifyBaseLogger,
     connections: Pick<AppConnectionSchema, 'externalId' | 'projectIds'>[],
@@ -1083,6 +1098,13 @@ type EngineValidateAuthParams = {
 
 type EngineResolveConnectionIdentifierParams = EngineValidateAuthParams & {
     connectionType: AppConnectionType
+}
+
+type ListFlowsUsingConnectionParams = {
+    log: FastifyBaseLogger
+    projectId: ProjectId
+    externalId: string
+    applyToPublishedVersions: boolean
 }
 
 type ReplaceParams = {
