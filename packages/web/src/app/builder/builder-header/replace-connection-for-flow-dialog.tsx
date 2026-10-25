@@ -2,6 +2,7 @@ import {
   AppConnectionReplaceScope,
   flowStructureUtil,
 } from '@activepieces/shared';
+import { useMutation } from '@tanstack/react-query';
 import { t } from 'i18next';
 import { TriangleAlert } from 'lucide-react';
 import React, { useState } from 'react';
@@ -32,7 +33,6 @@ import {
   appConnectionsMutations,
   appConnectionsQueries,
 } from '@/features/connections';
-import { flowsApi } from '@/features/flows';
 import { piecesHooks } from '@/features/pieces';
 import { authenticationSession } from '@/lib/authentication-session';
 
@@ -68,9 +68,13 @@ function ReplaceConnectionForFlowForm({
 }: {
   setDialogOpen: (open: boolean) => void;
 }) {
-  const [flow, flowVersion, setFlow, setVersion] = useBuilderStateContext(
-    (state) => [state.flow, state.flowVersion, state.setFlow, state.setVersion],
-  );
+  const [flow, flowVersion, savePendingEdits, refreshDraft] =
+    useBuilderStateContext((state) => [
+      state.flow,
+      state.flowVersion,
+      state.savePendingEdits,
+      state.refreshDraft,
+    ]);
   const projectId = authenticationSession.getProjectId()!;
   const { pieces, isLoading: piecesLoading } = piecesHooks.usePieces({});
   const { data: connections, isLoading: connectionsLoading } =
@@ -79,19 +83,26 @@ function ReplaceConnectionForFlowForm({
       extraKeys: [projectId],
       staleTime: 0,
     });
-  const { mutate: replaceConnections, isPending: isReplacing } =
+  const { mutateAsync: replaceConnections } =
     appConnectionsMutations.useReplaceConnections({
       setDialogOpen,
       refetch: () => {
-        flowsApi
-          .get(flow.id)
-          .then((updatedFlow) => {
-            setFlow(updatedFlow);
-            setVersion(updatedFlow.version);
-          })
-          .catch(() => internalErrorToast());
+        refreshDraft().catch(() => internalErrorToast());
       },
     });
+  const { mutate: saveEditsThenReplace, isPending: isReplacing } = useMutation({
+    mutationFn: async (values: FlowReplaceFormValues) => {
+      await savePendingEdits();
+      await replaceConnections({
+        scope: AppConnectionReplaceScope.FLOW,
+        flowIds: [flow.id],
+        projectId,
+        sourceAppConnectionId: values.sourceConnectionId,
+        targetAppConnectionId: values.targetConnectionId,
+        applyToPublishedVersions: values.applyToPublishedVersions,
+      });
+    },
+  });
   const form = useForm<FlowReplaceFormValues>({
     defaultValues: {
       ...replaceConnectionSelectionUtils.emptySelection(),
@@ -112,21 +123,10 @@ function ReplaceConnectionForFlowForm({
   const flowPieces =
     pieces?.filter((piece) => flowPieceNames.has(piece.name)) ?? [];
 
-  const handleSubmit = (values: FlowReplaceFormValues) => {
-    replaceConnections({
-      scope: AppConnectionReplaceScope.FLOW,
-      flowIds: [flow.id],
-      projectId,
-      sourceAppConnectionId: values.sourceConnectionId,
-      targetAppConnectionId: values.targetConnectionId,
-      applyToPublishedVersions: values.applyToPublishedVersions,
-    });
-  };
-
   return (
     <Form {...form}>
       <form
-        onSubmit={form.handleSubmit(handleSubmit)}
+        onSubmit={form.handleSubmit((values) => saveEditsThenReplace(values))}
         className="flex flex-col gap-4"
       >
         <ReplaceConnectionSelectionFields

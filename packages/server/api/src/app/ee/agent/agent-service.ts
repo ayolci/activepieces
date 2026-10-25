@@ -1,9 +1,10 @@
 import { createHash } from 'node:crypto'
+import { isDeepStrictEqual } from 'node:util'
 import { AgentToolType, McpAuthType } from '@activepieces/core-piece-types'
 import { ActivepiecesError, AIProviderName, apId, ApId, connectionTemplate, Cursor, ErrorCode, isNil, omit, Permission, PlatformId, ProjectId, sanitizeObjectForPostgresql, SeekPage, tryCatch, unique, UserId } from '@activepieces/core-utils'
-import { Agent, AgentConfig, AgentFlowTool, AgentKnowledgeBaseTool, AgentListSort, AgentMoveLoss, AgentMoveLossKind, AgentMovePreview, AgentRunSource, AgentSummary, agentUtils, AgentVisibility, aiProviderUtils, CreateAgentRequest, DefaultProjectRole, flowStructureUtil, Project, ProjectType, UpdateAgentRequest } from '@activepieces/shared'
+import { Agent, AgentConfig, AgentFlowTool, AgentKnowledgeBaseTool, AgentListSort, AgentMoveLoss, AgentMoveLossKind, AgentMovePreview, AgentRunSource, AgentSummary, agentUtils, AgentVisibility, aiProviderUtils, ApplicationEventName, CreateAgentRequest, DefaultProjectRole, flowStructureUtil, Project, ProjectType, UpdateAgentRequest } from '@activepieces/shared'
 import { FastifyBaseLogger } from 'fastify'
-import { Brackets, EntityManager, In, SelectQueryBuilder } from 'typeorm'
+import { Brackets, EntityManager, In, ObjectLiteral, SelectQueryBuilder } from 'typeorm'
 import { aiKeyScope } from '../../ai/ai-key-scope'
 import { aiModelOptionsService, aiModelOptionsUtils } from '../../ai/ai-model-options-service'
 import { AIProviderSchema } from '../../ai/ai-provider-entity'
@@ -14,6 +15,7 @@ import { transaction } from '../../core/db/transaction'
 import { publishHooksFactory } from '../../flows/flow/flow-publish-hooks'
 import { flowService, getFolderIdFromRequest } from '../../flows/flow/flow.service'
 import { PublishedFlowsUsingAgent, publishedFlowsUsingAgent, publishedFlowVersionsUsingAgent } from '../../flows/flow-version/flow-version.service'
+import { applicationEvents } from '../../helper/application-events'
 import { buildPaginator } from '../../helper/pagination/build-paginator'
 import { paginationHelper } from '../../helper/pagination/pagination-utils'
 import { Order, OrderByConfig } from '../../helper/pagination/paginator'
@@ -88,13 +90,8 @@ export const agentService = (log: FastifyBaseLogger) => ({
         }
 
         if (!isNil(connectionExternalIds)) {
-            query.andWhere(new Brackets((qb) => {
-                qb.where(toolsUseConnectionSql('agent."draft"'))
-                    .orWhere(toolsUseConnectionSql('agent."published"'))
-            }), {
-                pieceToolType: AgentToolType.PIECE,
-                connectionAuthValues: connectionExternalIds.flatMap((externalId) => [externalId, `{{connections['${externalId}']}}`]),
-            })
+            const { condition, parameters } = agentsWithPieceToolsUsingConnections({ agentStatus: ['draft', 'published'], connectionExternalIds })
+            query.andWhere(condition, parameters)
         }
 
         const { data, cursor: newCursor } = await paginator.paginate(query)
@@ -245,36 +242,57 @@ export const agentService = (log: FastifyBaseLogger) => ({
         })
     },
 
-    async replaceConnection({ projectId, sourceExternalId, targetExternalId, applyToPublishedVersions }: ReplaceConnectionParams): Promise<void> {
-        await transaction(async (entityManager) => {
+    async replaceConnection({ projectId, platformId, userId, sourceExternalId, targetExternalId, applyToPublishedVersions }: ReplaceConnectionParams): Promise<void> {
+        const updatedAgents = await transaction(async (entityManager) => {
             const repo = entityManager.getRepository(AgentEntity)
-            const agents = await repo.createQueryBuilder('agent')
+            const { condition, parameters } = agentsWithPieceToolsUsingConnections({
+                agentStatus: applyToPublishedVersions ? ['draft', 'published'] : ['draft'],
+                connectionExternalIds: [sourceExternalId],
+            })
+            const agentsToUpdate = await repo.createQueryBuilder('agent')
                 .setLock('pessimistic_write')
-                .select(['agent.id', 'agent.draft', 'agent.published'])
+                .select(['agent.id', 'agent.displayName', 'agent.draft', 'agent.published'])
                 .where('agent."projectId" = :projectId', { projectId })
+                .andWhere(condition, parameters)
                 .getMany()
             const replaceIn = (config: AgentConfig): AgentConfig => ({
                 ...config,
                 tools: config.tools.map((tool) => flowStructureUtil.replaceAgentToolConnection({ tool, sourceExternalId, targetExternalId })),
             })
-            const agentsToUpdate = agents.filter((agent) => usesConnection({ config: agent.draft, externalId: sourceExternalId })
-                || (applyToPublishedVersions && !isNil(agent.published) && usesConnection({ config: agent.published, externalId: sourceExternalId })))
-            await Promise.all(agentsToUpdate.map((agent) => repo.save({
+            const replacedAgents = agentsToUpdate.map((agent) => {
+                const replacedPublished = applyToPublishedVersions && !isNil(agent.published) ? replaceIn(agent.published) : null
+                return {
+                    id: agent.id,
+                    displayName: agent.displayName,
+                    draft: replaceIn(agent.draft),
+                    published: !isNil(replacedPublished) && !isDeepStrictEqual(replacedPublished, agent.published) ? replacedPublished : null,
+                }
+            })
+            await repo.save(replacedAgents.map((agent) => ({
                 id: agent.id,
-                draft: sanitizeObjectForPostgresql(replaceIn(agent.draft)),
-                ...(applyToPublishedVersions && !isNil(agent.published) && { published: sanitizeObjectForPostgresql(replaceIn(agent.published)) }),
+                draft: sanitizeObjectForPostgresql(agent.draft),
+                ...(!isNil(agent.published) && { published: sanitizeObjectForPostgresql(agent.published) }),
             })))
             log.info({ project: { id: projectId }, updatedAgentsCount: agentsToUpdate.length, applyToPublishedVersions }, 'App connection replaced in agents')
+            return replacedAgents
+        })
+        updatedAgents.forEach((agent) => {
+            applicationEvents(log).sendUserEvent({ platformId, projectId, userId }, {
+                action: isNil(agent.published) ? ApplicationEventName.AGENT_UPDATED : ApplicationEventName.AGENT_PUBLISHED,
+                data: { agent: { id: agent.id, displayName: agent.displayName, ...(isNil(agent.published) ? {} : describePublished({ published: agent.published })) } },
+            })
         })
     },
 
-    async countUsingConnection({ projectId, externalId, publishedOnly }: CountUsingConnectionParams): Promise<number> {
-        const agents = await agentRepo().find({
-            select: { id: true, draft: true, published: true },
-            where: { projectId },
+    async countAgentsUsingConnection({ projectId, connectionExternalId, publishedOnly }: CountAgentsUsingConnectionParams): Promise<number> {
+        const { condition, parameters } = agentsWithPieceToolsUsingConnections({
+            agentStatus: publishedOnly ? ['published'] : ['draft', 'published'],
+            connectionExternalIds: [connectionExternalId],
         })
-        return agents.filter((agent) => (!publishedOnly && usesConnection({ config: agent.draft, externalId }))
-            || (!isNil(agent.published) && usesConnection({ config: agent.published, externalId }))).length
+        return agentRepo().createQueryBuilder('agent')
+            .where('agent."projectId" = :projectId', { projectId })
+            .andWhere(condition, parameters)
+            .getCount()
     },
 
     async publishedFlowsUsing({ agent, projectId, userId, nameLimit = MAX_NAMED_FLOWS_IN_USE }: { agent: Agent, projectId: ProjectId, userId: UserId, nameLimit?: number }): Promise<PublishedFlowsUsingAgent> {
@@ -740,13 +758,18 @@ async function resolveReadableProjects({ platformId, userId, projectId, log }: R
         .filter((project) => isNil(projectId) || project.id === projectId)
 }
 
-function toolsUseConnectionSql(configColumn: string): string {
-    return `EXISTS (SELECT 1 FROM jsonb_array_elements(COALESCE(${configColumn}->'tools', '[]'::jsonb)) AS tool WHERE tool->>'type' = :pieceToolType AND tool#>>'{pieceMetadata,predefinedInput,auth}' = ANY(:connectionAuthValues))`
-}
-
-function usesConnection({ config, externalId }: { config: AgentConfig, externalId: string }): boolean {
-    return config.tools.some((tool) => tool.type === AgentToolType.PIECE
-        && connectionTemplate.unwrapExternalId(tool.pieceMetadata.predefinedInput?.auth) === externalId)
+function agentsWithPieceToolsUsingConnections({ agentStatus, connectionExternalIds }: AgentsWithPieceToolsUsingConnectionsParams): { condition: Brackets, parameters: ObjectLiteral } {
+    return {
+        condition: new Brackets((qb) => {
+            agentStatus.forEach((status) => {
+                qb.orWhere(`EXISTS (SELECT 1 FROM jsonb_array_elements(COALESCE(agent."${status}"->'tools', '[]'::jsonb)) AS tool WHERE tool->>'type' = :pieceToolType AND tool#>>'{pieceMetadata,predefinedInput,auth}' = ANY(:connectionAuthValues))`)
+            })
+        }),
+        parameters: {
+            pieceToolType: AgentToolType.PIECE,
+            connectionAuthValues: connectionExternalIds.flatMap((connectionExternalId) => [connectionExternalId, `{{connections['${connectionExternalId}']}}`]),
+        },
+    }
 }
 
 function toSummary(agent: Agent, project?: Project): AgentSummary {
@@ -819,15 +842,22 @@ type MoveParams = {
 
 type ReplaceConnectionParams = {
     projectId: ProjectId
+    platformId: PlatformId
+    userId: UserId
     sourceExternalId: string
     targetExternalId: string
     applyToPublishedVersions: boolean
 }
 
-type CountUsingConnectionParams = {
+type CountAgentsUsingConnectionParams = {
     projectId: ProjectId
-    externalId: string
+    connectionExternalId: string
     publishedOnly: boolean
+}
+
+type AgentsWithPieceToolsUsingConnectionsParams = {
+    agentStatus: ('draft' | 'published')[]
+    connectionExternalIds: string[]
 }
 
 type EditDraftToolsParams = GetParams & {

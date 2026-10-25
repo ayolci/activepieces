@@ -1,6 +1,6 @@
 import { ApId, Permission, SeekPage } from '@activepieces/core-utils'
 import { wideEvent } from '@activepieces/server-utils'
-import { ActivepiecesError, AppConnectionOwners, AppConnectionReplaceScope, AppConnectionScope, AppConnectionStatus, AppConnectionType, AppConnectionWithoutSensitiveData, ApplicationEventName, ErrorCode, GetOAuth2AuthorizationUrlRequestBody, GetOAuth2AuthorizationUrlResponse, ListAppConnectionOwnersRequestQuery, ListAppConnectionsRequestQuery, PLACEHOLDER_CONNECTION_TYPE, PrincipalType, ReplaceAppConnectionsRequestBody, SERVICE_KEY_SECURITY_OPENAPI, UpdateConnectionValueRequestBody, UpsertAppConnectionRequestBody } from '@activepieces/shared'
+import { ActivepiecesError, AppConnectionOwners, AppConnectionScope, AppConnectionStatus, AppConnectionType, AppConnectionWithoutSensitiveData, ApplicationEventName, ErrorCode, GetOAuth2AuthorizationUrlRequestBody, GetOAuth2AuthorizationUrlResponse, ListAppConnectionOwnersRequestQuery, ListAppConnectionsRequestQuery, PLACEHOLDER_CONNECTION_TYPE, PrincipalType, ReplaceAppConnectionsRequestBody, SERVICE_KEY_SECURITY_OPENAPI, UpdateConnectionValueRequestBody, UpsertAppConnectionRequestBody } from '@activepieces/shared'
 import { FastifyPluginCallbackZod } from 'fastify-type-provider-zod'
 import { StatusCodes } from 'http-status-codes'
 import { z } from 'zod'
@@ -126,16 +126,11 @@ export const appConnectionController: FastifyPluginCallbackZod = (app, _opts, do
     )
 
     app.post('/replace', ReplaceAppConnectionsRequest, async (request, reply) => {
-        const body = request.body
         await appConnectionService(request.log).replace({
-            sourceAppConnectionId: body.sourceAppConnectionId,
-            targetAppConnectionId: body.targetAppConnectionId,
+            ...request.body,
             projectId: request.projectId,
             platformId: request.principal.platform.id,
             userId: request.principal.id,
-            deleteSourceConnection: body.scope === AppConnectionReplaceScope.PROJECT && body.deleteSourceConnection,
-            applyToPublishedVersions: body.applyToPublishedVersions,
-            flowIds: body.scope === AppConnectionReplaceScope.FLOW ? body.flowIds : undefined,
         })
         await reply.status(StatusCodes.NO_CONTENT).send()
     })

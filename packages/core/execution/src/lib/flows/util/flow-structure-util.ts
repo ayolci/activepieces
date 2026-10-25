@@ -1,5 +1,5 @@
 import { AgentPieceProps, AgentPieceTool, AgentTool, AgentToolType } from '@activepieces/core-piece-types'
-import { connectionTemplate, isNil, unique } from '@activepieces/core-utils'
+import { connectionTemplate, isNil, isObject, unique } from '@activepieces/core-utils'
 import { ActivepiecesError, ErrorCode } from '@activepieces/core-utils'
 import { BranchCondition, BranchedAction, BranchExecutionType, CodeAction, emptyCondition, FlowAction, FlowActionType, PieceAction } from '../actions/action'
 import { FlowVersion } from '../flow-version'
@@ -280,19 +280,10 @@ function isAgentPiece(action: Step) {
 }
 
 function extractConnectionIds(flowVersion: FlowVersion): string[] {
-    const triggerAuthIds = flowVersion.trigger.settings?.input?.auth
-        ? extractConnectionIdsFromAuth(flowVersion.trigger.settings.input.auth)
-        : []
-
-    const stepAuthIds = flowStructureUtil
-        .getAllSteps(flowVersion.trigger)
-        .flatMap(step =>
-            step.settings?.input?.auth
-                ? extractConnectionIdsFromAuth(step.settings.input.auth)
-                : [],
-        )
-
-    return Array.from(new Set([...triggerAuthIds, ...stepAuthIds, ...extractAgentToolConnectionIds(flowVersion)]))
+    const stepAuthIds = getAllSteps(flowVersion.trigger).flatMap((step) =>
+        step.settings?.input?.auth ? extractConnectionIdsFromAuth(step.settings.input.auth) : [],
+    )
+    return unique([...stepAuthIds, ...extractAgentToolsConnectionIds(flowVersion)])
 }
 
 function getAgentToolConnectionId(tool: unknown): string | undefined {
@@ -303,12 +294,12 @@ function getAgentToolConnectionId(tool: unknown): string | undefined {
     return connectionTemplate.unwrapExternalId(pieceTool.data.pieceMetadata.predefinedInput?.auth) ?? undefined
 }
 
-function extractAgentToolConnectionIds(flowVersion: FlowVersion): string[] {
-    const connectionIds = getAllSteps(flowVersion.trigger).flatMap((step) => getAgentTools(step).map(getAgentToolConnectionId))
+function extractAgentToolsConnectionIds(flowVersion: FlowVersion): string[] {
+    const connectionIds = getAllSteps(flowVersion.trigger).flatMap((step) => getAgentToolsInlinedInStep(step).map(getAgentToolConnectionId))
     return unique(connectionIds.filter((connectionId): connectionId is string => !isNil(connectionId) && connectionId !== ''))
 }
 
-function getAgentTools(step: Step): unknown[] {
+function getAgentToolsInlinedInStep(step: Step): unknown[] {
     if (!isAgentPiece(step)) {
         return []
     }
@@ -319,11 +310,11 @@ function getAgentTools(step: Step): unknown[] {
 function replaceConnection({ flowVersion, sourceExternalId, targetExternalId }: ReplaceConnectionParams): FlowVersion {
     return transferFlow(flowVersion, (step) => {
         const input = step.settings?.input
-        if (!input) {
+        if (!isObject(input)) {
             return step
         }
-        const replacesAuth = input.auth === `{{connections['${sourceExternalId}']}}`
-        const agentTools = getAgentTools(step)
+        const replacesAuth = input['auth'] === `{{connections['${sourceExternalId}']}}`
+        const agentTools = getAgentToolsInlinedInStep(step)
         const replacesAgentTools = agentTools.some((tool) => getAgentToolConnectionId(tool) === sourceExternalId)
         if (!replacesAuth && !replacesAgentTools) {
             return step
@@ -335,14 +326,14 @@ function replaceConnection({ flowVersion, sourceExternalId, targetExternalId }: 
                 input: {
                     ...input,
                     ...(replacesAuth && { auth: `{{connections['${targetExternalId}']}}` }),
-                    ...(replacesAgentTools && { [AgentPieceProps.AGENT_TOOLS]: agentTools.map((tool) => withAgentToolConnection({ tool, sourceExternalId, targetExternalId })) }),
+                    ...(replacesAgentTools && { [AgentPieceProps.AGENT_TOOLS]: agentTools.map((tool) => replaceInlinedAgentToolConnection({ tool, sourceExternalId, targetExternalId })) }),
                 },
             },
         }
     })
 }
 
-function withAgentToolConnection({ tool, sourceExternalId, targetExternalId }: { tool: unknown } & ReplaceToolConnectionParams): unknown {
+function replaceInlinedAgentToolConnection({ tool, sourceExternalId, targetExternalId }: { tool: unknown } & ReplaceToolConnectionParams): unknown {
     const pieceTool = AgentPieceTool.safeParse(tool)
     if (!pieceTool.success) {
         return tool
@@ -394,7 +385,7 @@ export const flowStructureUtil = {
     isBranchedAction,
     extractAgentIds,
     getAgentToolConnectionId,
-    extractAgentToolConnectionIds,
+    extractAgentToolsConnectionIds,
     replaceAgentToolConnection,
     replaceConnection,
 }

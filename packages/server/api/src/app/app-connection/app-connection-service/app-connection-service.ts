@@ -1,6 +1,6 @@
 import { ActivepiecesError, apId, Cursor, ErrorCode, FlowId, isNil, Metadata, PlatformId, ProjectId, SeekPage, spreadIfDefined, tryCatch, tryCatchSync, unique, UserId } from '@activepieces/core-utils'
 import { PieceMetadata } from '@activepieces/pieces-framework'
-import { ApEdition, ApEnvironment, AppConnection, AppConnectionId, AppConnectionOwners, AppConnectionScope, AppConnectionStatus, AppConnectionType, AppConnectionValue, AppConnectionWithoutSensitiveData, ConnectionState, EngineResponse, EngineResponseStatus, ExecuteResolveConnectionIdentifierResponse, ExecuteValidateAuthResponse, MAX_PLATFORM_APP_CONNECTION_OWNERS, OAuth2GrantType, PlatformAppConnectionOwner, PlatformAppConnectionOwnersResponse, PlatformAppConnectionProjectInfo, PlatformAppConnectionsListItem, PlatformRole, UpsertAppConnectionRequestBody, WorkerJobType } from '@activepieces/shared'
+import { ApEdition, ApEnvironment, AppConnection, AppConnectionId, AppConnectionOwners, AppConnectionReplaceScope, AppConnectionScope, AppConnectionStatus, AppConnectionType, AppConnectionValue, AppConnectionWithoutSensitiveData, ConnectionState, EngineResponse, EngineResponseStatus, ExecuteResolveConnectionIdentifierResponse, ExecuteValidateAuthResponse, MAX_PLATFORM_APP_CONNECTION_OWNERS, OAuth2GrantType, PlatformAppConnectionOwner, PlatformAppConnectionOwnersResponse, PlatformAppConnectionProjectInfo, PlatformAppConnectionsListItem, PlatformRole, UpsertAppConnectionRequestBody, WorkerJobType } from '@activepieces/shared'
 import { FastifyBaseLogger } from 'fastify'
 import semver from 'semver'
 import { ArrayContains, Equal, FindOperator, FindOptionsWhere, ILike, In } from 'typeorm'
@@ -265,7 +265,8 @@ export const appConnectionService = (log: FastifyBaseLogger) => ({
     },
 
     async replace(params: ReplaceParams): Promise<void> {
-        const { sourceAppConnectionId, targetAppConnectionId, projectId, platformId, userId, deleteSourceConnection, applyToPublishedVersions, flowIds } = params
+        const { sourceAppConnectionId, targetAppConnectionId, projectId, platformId, userId, applyToPublishedVersions } = params
+        const deleteSourceConnection = params.scope === AppConnectionReplaceScope.PROJECT && params.deleteSourceConnection
         if (sourceAppConnectionId === targetAppConnectionId) {
             throw new ActivepiecesError({
                 code: ErrorCode.VALIDATION,
@@ -315,7 +316,7 @@ export const appConnectionService = (log: FastifyBaseLogger) => ({
         // the newer draft, so the user has to publish or repoint them first.
         // Without it, a delete would orphan every published reference.
         const publishedFlowsUsingConnection = deleteSourceConnection || applyToPublishedVersions
-            ? await appConnectionHandler(log).countPublishedFlowsReferencingConnection({ projectId, externalId: sourceAppConnection.externalId, applyToPublishedVersions, flowIds })
+            ? await appConnectionHandler(log).countPublishedFlowsReferencingConnection({ projectId, externalId: sourceAppConnection.externalId, applyToPublishedVersions, flowIds: params.scope === AppConnectionReplaceScope.FLOW ? params.flowIds : undefined })
             : 0
         if (publishedFlowsUsingConnection > 0) {
             throw new ActivepiecesError({
@@ -329,7 +330,7 @@ export const appConnectionService = (log: FastifyBaseLogger) => ({
         }
 
         const publishedAgentsBlockingDelete = deleteSourceConnection && !applyToPublishedVersions
-            ? await agentService(log).countUsingConnection({ projectId, externalId: sourceAppConnection.externalId, publishedOnly: true })
+            ? await agentService(log).countAgentsUsingConnection({ projectId, connectionExternalId: sourceAppConnection.externalId, publishedOnly: true })
             : 0
         if (publishedAgentsBlockingDelete > 0) {
             throw new ActivepiecesError({
@@ -340,18 +341,19 @@ export const appConnectionService = (log: FastifyBaseLogger) => ({
             })
         }
 
-        if (!isNil(flowIds)) {
+        if (params.scope === AppConnectionReplaceScope.FLOW) {
+            const flowIdsToReplaceConnectionsIn = params.flowIds
             const flows = await flowService(log).list({
                 projectIds: [projectId],
                 cursorRequest: null,
-                limit: flowIds.length,
+                limit: flowIdsToReplaceConnectionsIn.length,
                 folderId: undefined,
                 name: undefined,
                 status: undefined,
-                flowIds,
+                flowIds: flowIdsToReplaceConnectionsIn,
             })
             const foundFlowIds = new Set(flows.data.map((flow) => flow.id))
-            const missingFlowIds = unique(flowIds).filter((flowId) => !foundFlowIds.has(flowId))
+            const missingFlowIds = unique(flowIdsToReplaceConnectionsIn).filter((flowId) => !foundFlowIds.has(flowId))
             if (missingFlowIds.length > 0) {
                 throw new ActivepiecesError({
                     code: ErrorCode.VALIDATION,
@@ -404,6 +406,8 @@ export const appConnectionService = (log: FastifyBaseLogger) => ({
 
         await agentService(log).replaceConnection({
             projectId,
+            platformId,
+            userId,
             sourceExternalId: sourceAppConnection.externalId,
             targetExternalId: targetAppConnection.externalId,
             applyToPublishedVersions,
@@ -432,7 +436,7 @@ export const appConnectionService = (log: FastifyBaseLogger) => ({
         const remainingPublishedFlows = remainingFlows.data.length > 0
             ? 0
             : await appConnectionHandler(log).countPublishedFlowsReferencingConnection({ projectId, externalId: sourceAppConnection.externalId, applyToPublishedVersions: false })
-        const remainingAgents = await agentService(log).countUsingConnection({ projectId, externalId: sourceAppConnection.externalId, publishedOnly: false })
+        const remainingAgents = await agentService(log).countAgentsUsingConnection({ projectId, connectionExternalId: sourceAppConnection.externalId, publishedOnly: false })
         if (remainingFlows.data.length > 0 || remainingPublishedFlows > 0 || remainingAgents > 0) {
             throw new ActivepiecesError({
                 code: ErrorCode.VALIDATION,
@@ -1110,8 +1114,9 @@ type ReplaceParams = {
     projectId: ProjectId
     platformId: string
     userId: UserId
-    deleteSourceConnection: boolean
     applyToPublishedVersions: boolean
-    flowIds: FlowId[] | undefined
-}
+} & (
+    | { scope: AppConnectionReplaceScope.PROJECT, deleteSourceConnection: boolean }
+    | { scope: AppConnectionReplaceScope.FLOW, flowIds: FlowId[] }
+)
 
