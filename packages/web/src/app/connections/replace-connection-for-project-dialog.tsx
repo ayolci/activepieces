@@ -345,7 +345,11 @@ function ReplaceConnectionForProjectForm({
                 <Button
                   type="button"
                   variant="secondary"
-                  onClick={() => setStep(ProjectReplaceStep.CHOOSE_CONNECTIONS)}
+                  onClick={() => {
+                    form.setValue('deleteSourceConnection', false);
+                    form.setValue('applyToPublishedVersions', false);
+                    setStep(ProjectReplaceStep.CHOOSE_CONNECTIONS);
+                  }}
                 >
                   {t('Back')}
                 </Button>
