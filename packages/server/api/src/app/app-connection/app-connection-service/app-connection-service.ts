@@ -327,6 +327,9 @@ export const appConnectionService = (log: FastifyBaseLogger) => ({
                 },
             })
         }
+        if (deleteSourceConnection) {
+            await assertNoPendingApprovalUsesConnection({ projectId, externalId: sourceAppConnection.externalId, log })
+        }
 
         if (params.scope === AppConnectionReplaceScope.FLOW) {
             const flowIdsToReplaceConnectionsIn = params.flowIds
@@ -405,6 +408,7 @@ export const appConnectionService = (log: FastifyBaseLogger) => ({
                 },
             })
         }
+        await assertNoPendingApprovalUsesConnection({ projectId, externalId: sourceAppConnection.externalId, log })
 
         await this.delete({
             id: sourceAppConnection.id,
@@ -976,6 +980,18 @@ async function fetchFlowIdsForConnections(
     })
 
     return flowIdsByExternalId
+}
+
+async function assertNoPendingApprovalUsesConnection({ projectId, externalId, log }: { projectId: ProjectId, externalId: string, log: FastifyBaseLogger }): Promise<void> {
+    const pendingApprovals = await publishHooksFactory.get(log).countPendingApprovalsUsingConnection({ projectId, externalId })
+    if (pendingApprovals > 0) {
+        throw new ActivepiecesError({
+            code: ErrorCode.VALIDATION,
+            params: {
+                message: 'A flow waiting for publish approval still uses the old connection, so it cannot be deleted now. Keep it, and delete it after the request is approved or rejected.',
+            },
+        })
+    }
 }
 
 function validatePieceVersion(pieceVersion: string): void {

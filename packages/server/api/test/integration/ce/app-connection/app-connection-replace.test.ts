@@ -623,7 +623,7 @@ describe('POST /v1/app-connections/replace', () => {
         expect(publishedFlowVersions[0].trigger.settings.input).toEqual({ auth: connectionRef(target.externalId), marker: 'draft-edit' })
     })
 
-    it('rewires a newer locked version that uses the source connection even when the live version does not', async () => {
+    it('republishes the live version, not a newer locked version that is not live', async () => {
         const ctx = await createTestContext(app!)
         const { source, target } = await saveSourceAndTarget(ctx)
 
@@ -636,15 +636,15 @@ describe('POST /v1/app-connections/replace', () => {
             flowId: flow.id,
             state: FlowVersionState.LOCKED,
             created: '2020-01-01T00:00:00.000Z',
-            connectionIds: [target.externalId],
-            trigger: pieceTrigger({ externalId: target.externalId, marker: 'published' }),
+            connectionIds: [source.externalId],
+            trigger: pieceTrigger({ externalId: source.externalId, marker: 'published' }),
         })
         const submittedVersion = createMockFlowVersion({
             flowId: flow.id,
             state: FlowVersionState.LOCKED,
             created: '2020-06-01T00:00:00.000Z',
-            connectionIds: [source.externalId],
-            trigger: pieceTrigger({ externalId: source.externalId, marker: 'submitted' }),
+            connectionIds: [target.externalId],
+            trigger: pieceTrigger({ externalId: target.externalId, marker: 'submitted' }),
         })
         await db.save('flow_version', [liveVersion, submittedVersion])
         flow.publishedVersionId = liveVersion.id
@@ -659,8 +659,10 @@ describe('POST /v1/app-connections/replace', () => {
 
         expect(response?.statusCode).toBe(StatusCodes.NO_CONTENT)
         const versions = await versionsNewestFirst(flow.id)
-        const newestLocked = versions.find((v) => v.state === FlowVersionState.LOCKED)
-        expect(newestLocked?.trigger.settings.input).toEqual({ auth: connectionRef(target.externalId), marker: 'submitted' })
+        const updatedFlow = await db.findOneBy<Flow>('flow', { id: flow.id })
+        const newLiveVersion = versions.find((v) => v.id === updatedFlow?.publishedVersionId)
+        expect(newLiveVersion?.id).not.toBe(liveVersion.id)
+        expect(newLiveVersion?.trigger.settings.input).toEqual({ auth: connectionRef(target.externalId), marker: 'published' })
     })
 
     it('repoints only the listed flows when the scope is flow, and keeps their sample data', async () => {

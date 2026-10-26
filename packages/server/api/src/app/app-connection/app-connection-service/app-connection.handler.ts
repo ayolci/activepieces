@@ -1,4 +1,4 @@
-import { ActivepiecesError, assertNotNullOrUndefined, ErrorCode, FlowId, isNil, PlatformId, ProjectId, tryCatch, unique, UserId } from '@activepieces/core-utils'
+import { ActivepiecesError, ErrorCode, FlowId, isNil, PlatformId, ProjectId, tryCatch, unique, UserId } from '@activepieces/core-utils'
 import { PropertyType } from '@activepieces/pieces-framework'
 import { AppConnection, AppConnectionStatus, AppConnectionType, AppConnectionValue, AppConnectionWithoutSensitiveData, EngineResponse, EngineResponseStatus, ExecuteRefreshTokenAuthResponse, Flow, FlowOperationType, flowStructureUtil, FlowVersion, FlowVersionState, PopulatedFlow, WorkerJobType } from '@activepieces/shared'
 import dayjs from 'dayjs'
@@ -337,23 +337,13 @@ async function findFlowIdsToRepublish({ flows, externalId }: FindFlowIdsToRepubl
         return new Set()
     }
 
-    const newestLockedConnectionIds = flowVersionRepo()
-        .createQueryBuilder('fv_locked')
-        .select('fv_locked."connectionIds"')
-        .where('fv_locked."flowId" = flow.id')
-        .andWhere('fv_locked.state = :lockedState')
-        .orderBy('fv_locked.created', 'DESC')
-        .limit(1)
     const rows = await flowVersionRepo()
         .createQueryBuilder('flow_version')
         .select('flow.id', 'flowId')
         .innerJoin('flow', 'flow', 'flow."publishedVersionId" = flow_version.id')
         .where('flow.id IN (:...flowIds)', { flowIds: publishedFlows.map((flow) => flow.id) })
         .andWhere('flow."projectId" IN (:...projectIds)', { projectIds: unique(publishedFlows.map((flow) => flow.projectId)) })
-        .andWhere(`(flow_version."connectionIds" && :externalIds OR (${newestLockedConnectionIds.getQuery()}) && :externalIds)`, {
-            externalIds: [externalId],
-            lockedState: FlowVersionState.LOCKED,
-        })
+        .andWhere('flow_version."connectionIds" && :externalIds', { externalIds: [externalId] })
         .getRawMany<{ flowId: FlowId }>()
     return new Set(rows.map((row) => row.flowId))
 }
@@ -361,13 +351,13 @@ async function findFlowIdsToRepublish({ flows, externalId }: FindFlowIdsToRepubl
 async function replaceConnectionInPublishedVersion(params: ReplaceConnectionInPublishedVersionParams): Promise<void> {
     const { flow, latestVersion, userId, platformId, appConnection, newAppConnection, log } = params
     const projectId = flow.projectId
-    if (isNil(flow.publishedVersionId)) {
+    const publishedVersionId = flow.publishedVersionId
+    if (isNil(publishedVersionId)) {
         return
     }
 
     const { error } = await tryCatch(async () => {
-        const lastPublishedVersion = await flowVersionService(log).getLatestVersion(flow.id, FlowVersionState.LOCKED)
-        assertNotNullOrUndefined(lastPublishedVersion, `Last published version not found for flow ${flow.id}`)
+        const publishedVersion = await flowVersionService(log).getFlowVersionOrThrow({ flowId: flow.id, versionId: publishedVersionId })
 
         await flowService(log).update({
             id: flow.id,
@@ -377,7 +367,7 @@ async function replaceConnectionInPublishedVersion(params: ReplaceConnectionInPu
             previousFlow: flow,
             operation: {
                 type: FlowOperationType.IMPORT_FLOW,
-                request: replaceConnectionInFlowVersion({ flowVersion: lastPublishedVersion, appConnection, newAppConnection }),
+                request: replaceConnectionInFlowVersion({ flowVersion: publishedVersion, appConnection, newAppConnection }),
             },
             auditExplanation: replaceConnectionAuditExplanation({ appConnection, newAppConnection }),
         })
